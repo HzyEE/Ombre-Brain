@@ -9,7 +9,8 @@ decay_engine.py — 记忆衰减引擎，模拟人类遗忘曲线
 关键行为：
 - 打分公式（改进版艾宾浩斯 + 情感坐标）：
     Score = Importance × (activation_count^0.3) × e^(-λ×days) × emotion_weight
-- 情感权重 = base + arousal × arousal_boost；唤醒度高的记忆衰减得慢
+- 情感权重 = base + arousal × arousal_boost + valence_intensity × valence_boost
+  唤醒度高的记忆衰减得慢；valence 越偏离中性（特别开心或特别痛）衰减也越慢
 - anchor / pinned / protected 桶不参与衰减、不被归档
 - ensure_started() 幂等启动后台循环；可被测试 monkeypatch 成 noop
 
@@ -49,6 +50,7 @@ _DEFAULT_THRESHOLD = 0.3          # 低于此分数 → 归档
 _DEFAULT_CHECK_INTERVAL_HRS = 24  # 后台循环间隔（小时）
 _DEFAULT_EMOTION_BASE = 1.0       # 情感权重基准
 _DEFAULT_AROUSAL_BOOST = 0.8      # arousal 每 +1 → 情感权重 +0.8
+_DEFAULT_VALENCE_BOOST = 0.5      # valence 极端度每 +1 → 情感权重 +0.5（越偏离中性越强）
 
 # --- 锁分：某些桶不参与衰减 ---
 _SCORE_ALWAYS_SURFACE = 999.0  # always_surface 桶强制浮现（每次 breath 必出现）
@@ -143,6 +145,7 @@ class DecayEngine:
         emotion_cfg = decay_cfg.get("emotion_weights", {})
         self.emotion_base = emotion_cfg.get("base", _DEFAULT_EMOTION_BASE)
         self.arousal_boost = emotion_cfg.get("arousal_boost", _DEFAULT_AROUSAL_BOOST)
+        self.valence_boost = emotion_cfg.get("valence_boost", _DEFAULT_VALENCE_BOOST)
 
         self.bucket_mgr = bucket_mgr
 
@@ -229,7 +232,12 @@ class DecayEngine:
             arousal = max(0.0, min(1.0, float(metadata.get("arousal", _DEFAULT_AROUSAL))))
         except (ValueError, TypeError):
             arousal = _DEFAULT_AROUSAL
-        emotion_weight = self.emotion_base + arousal * self.arousal_boost
+        try:
+            valence = max(0.0, min(1.0, float(metadata.get("valence", 0.5))))
+        except (ValueError, TypeError):
+            valence = 0.5
+        valence_intensity = abs(valence - 0.5) * 2.0
+        emotion_weight = self.emotion_base + arousal * self.arousal_boost + valence_intensity * self.valence_boost
 
         # --- Time weight ---
         time_weight = self._calc_time_weight(days_since)
