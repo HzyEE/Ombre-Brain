@@ -4772,12 +4772,13 @@ async function loadBuckets() {
 
 function updateStats() {
   const total = allBuckets.length;
-  const pinned = allBuckets.filter(b => b.pinned).length;
+  const alwaysSurface = allBuckets.filter(b => b.always_surface).length;
+  const pinned = allBuckets.filter(b => b.pinned && !b.always_surface).length;
   const feels = allBuckets.filter(b => b.type === 'feel').length;
   const resolved = allBuckets.filter(b => b.resolved).length;
   const digested = allBuckets.filter(b => b.digested).length;
   document.getElementById('stats').textContent =
-    total + ' 桶 · ' + pinned + ' 钉选 · ' + feels + ' feel · ' + resolved + ' 已解决 · ' + digested + ' 已消化';
+    total + ' 桶 · ' + alwaysSurface + ' 核心 · ' + pinned + ' 钉选 · ' + feels + ' feel · ' + resolved + ' 已解决 · ' + digested + ' 已消化';
   updateChick(total);   // 小黄鸡蛋随记忆总数孵化长大
 }
 
@@ -4787,6 +4788,7 @@ function buildFilters() {
   const filters = document.getElementById('filters');
   const types = [
     { key: 'all', label: '全部' },
+    { key: 'always_surface', label: '<i data-lucide="star"></i> 核心' },
     { key: 'pinned', label: '<i data-lucide="pin"></i> 钉选' },
     { key: 'feel', label: '<i data-lucide="droplet"></i> Feel' },
     { key: 'unresolved', label: '<i data-lucide="zap"></i> 未解决' },
@@ -4834,7 +4836,8 @@ function buildFilters() {
 
 function filterBuckets(buckets) {
   if (currentFilter === 'all') return buckets;
-  if (currentFilter === 'pinned') return buckets.filter(function(b) { return b.pinned; });
+  if (currentFilter === 'always_surface') return buckets.filter(function(b) { return b.always_surface; });
+  if (currentFilter === 'pinned') return buckets.filter(function(b) { return b.pinned && !b.always_surface; });
   if (currentFilter === 'feel') return buckets.filter(function(b) { return b.type === 'feel'; });
   if (currentFilter === 'unresolved') return buckets.filter(function(b) { return !b.resolved && b.type !== 'permanent' && !b.pinned; });
   if (currentFilter === 'digested') return buckets.filter(function(b) { return b.digested; });

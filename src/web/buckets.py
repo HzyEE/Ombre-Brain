@@ -157,6 +157,8 @@ def register(mcp) -> None:
                     "importance": meta.get("importance", 5),
                     "resolved": meta.get("resolved", False),
                     "pinned": meta.get("pinned", False),
+                    "protected": parse_bool(meta.get("protected"), default=False),
+                    "always_surface": bool(meta.get("always_surface", False)),
                     "digested": meta.get("digested", False),
                     "imported": parse_bool(meta.get("imported"), default=False)
                     or str(meta.get("source_tool") or "").strip() == "import",
