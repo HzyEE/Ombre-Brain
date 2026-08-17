@@ -11,6 +11,7 @@ tools/breath/surface.py — 无 query 浮现模式
 - 排除 digested 桶（已消化记忆只允许显式检索/审计找回）
 - 通过主动浮现策略的 pinned/permanent 桶作为「核心准则」置顶
 - protected 只防衰减，不进入核心准则、未解决池、被动联想或偶遇池
+- 每次浮现预留 1 个随机槽位给 importance<8 的低权重记忆，防止沉底
 - 未解决桶按 calculate_score 排序；冷启动桶（从未访问且 importance>=8）插队前 2
 - 配置开关 surfacing.sampling.enabled 启用后做加权无放回采样，否则
   保留 top1 + top20 内随机洗牌
@@ -419,6 +420,37 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, c
     except Exception as e:
         rt.logger.warning(f"passive association block failed: {e}")
 
+    # --- 第三刀：随机浮现槽位（wild card）---
+    # 每次 breath 预留 1 个槽位给低权重记忆（importance < 8），纯随机不看分数。
+    # 和 passive（imp>=8 久未浮现）、偶遇（resolved 池）互补，
+    # 保证低权重记忆不会永远沉底。
+    wildcard_results: list[str] = []
+    if not pinned_omitted and not dynamic_omitted:
+        try:
+            shown_ids = {b["id"] for b in candidates}
+            wildcard_pool = [
+                b for b in unresolved
+                if b["id"] not in shown_ids
+                and int(b["metadata"].get("importance") or 5) < 8
+                and not b["metadata"].get("dont_surface", False)
+            ]
+            if wildcard_pool:
+                pick = random.choice(wildcard_pool)
+                try:
+                    rendered, entry_tokens = render_stored_bucket(
+                        pick,
+                        f"🎲 [随机浮现] [bucket_id:{pick['id']}]",
+                        _footprint(pick),
+                    )
+                    if entry_tokens <= token_budget:
+                        wildcard_results.append(rendered)
+                        token_budget -= entry_tokens
+                        shown_ids.add(pick["id"])
+                except Exception as e:
+                    rt.logger.warning(f"Wildcard surface render failed: {e}")
+        except Exception as e:
+            rt.logger.warning(f"Wildcard surface block failed: {e}")
+
     # --- 3% 偶遇：从 resolved 池随机浮现 1~3 条沉底记忆 (iter 2.1) ---
     # 设计意图：让已解决的记忆有小概率重新出现，制造"忽然想起"的温度。
     # 与无结果兜底逻辑并存；不替换主流程。
@@ -466,6 +498,8 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, c
         parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
     if passive_results:
         parts.append("=== 久未浮现 ===\n" + "\n---\n".join(passive_results))
+    if wildcard_results:
+        parts.append("=== 随机浮现 ===\n" + "\n---\n".join(wildcard_results))
     if dream_results:
         parts.append("=== 偶然想起 ===\n" + "\n---\n".join(dream_results))
     if pinned_omitted:
