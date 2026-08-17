@@ -64,6 +64,7 @@ async def trace_core(
     status: Optional[str] = "",
     weight: Optional[float] = -1,
     dont_surface: Optional[int] = -1,
+    always_surface: Optional[int] = -1,
     why_remembered: Optional[str] = "",
     meaning_append: Optional[str] = "",
     meaning_replace: Optional[list] = None,
@@ -106,6 +107,8 @@ async def trace_core(
         weight = -1
     if dont_surface is None:
         dont_surface = -1
+    if always_surface is None:
+        always_surface = -1
     if why_remembered is None:
         why_remembered = ""
     if meaning_append is None:
@@ -149,6 +152,7 @@ async def trace_core(
     protected = _safe_int(protected, -1)
     digested = _safe_int(digested, -1)
     dont_surface = _safe_int(dont_surface, -1)
+    always_surface = _safe_int(always_surface, -1)
     if protected not in (-1, 0, 1):
         return "protected 只能传 -1、0 或 1；本次未修改。"
 
@@ -593,6 +597,10 @@ async def trace_core(
             updates["weight"] = float(weight)
         if dont_surface in (0, 1):
             updates["dont_surface"] = bool(dont_surface)
+        if always_surface in (0, 1):
+            updates["always_surface"] = bool(always_surface)
+            if always_surface == 1:
+                updates["importance"] = 10
         why_remembered = str(why_remembered).strip()
         if why_remembered == "\\clear":
             updates["why_remembered"] = ""

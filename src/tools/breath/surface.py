@@ -25,6 +25,7 @@ tools/breath/surface.py — 无 query 浮现模式
 ========================================
 """
 
+import re as _re
 import random
 import time
 from datetime import datetime, timedelta
@@ -34,6 +35,71 @@ from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
 from utils import parse_bool, parse_iso_datetime
 from ._verbatim import render_stored_bucket
+
+_CONTEXT_EMOTION_KEYWORDS: dict[str, tuple[float, float]] = {
+    "生气": (0.2, 0.8), "愤怒": (0.1, 0.9), "烦": (0.3, 0.6),
+    "焦虑": (0.3, 0.7), "烦躁": (0.3, 0.7), "崩溃": (0.2, 0.8),
+    "难过": (0.2, 0.3), "伤心": (0.2, 0.4), "累": (0.3, 0.2),
+    "疲惫": (0.2, 0.2), "低落": (0.2, 0.2), "沮丧": (0.2, 0.3),
+    "哭": (0.2, 0.5), "委屈": (0.2, 0.5), "孤独": (0.2, 0.2),
+    "寂寞": (0.2, 0.2), "不安": (0.3, 0.6), "emo": (0.3, 0.3),
+    "开心": (0.8, 0.7), "高兴": (0.8, 0.6), "快乐": (0.9, 0.7),
+    "幸福": (0.9, 0.5), "兴奋": (0.8, 0.9), "激动": (0.8, 0.8),
+    "安心": (0.8, 0.3), "温柔": (0.7, 0.3), "舒服": (0.7, 0.3),
+    "感动": (0.8, 0.5), "甜": (0.8, 0.4), "想你": (0.6, 0.5),
+    "想念": (0.5, 0.4), "害怕": (0.3, 0.7), "恐惧": (0.2, 0.8),
+    "紧张": (0.4, 0.7), "羞耻": (0.3, 0.5), "尴尬": (0.3, 0.5),
+    "心疼": (0.4, 0.5), "无聊": (0.4, 0.2), "迷茫": (0.3, 0.3),
+    "失望": (0.2, 0.4), "后悔": (0.2, 0.4), "嫉妒": (0.3, 0.7),
+    "感激": (0.8, 0.4), "骄傲": (0.8, 0.6), "满足": (0.8, 0.3),
+}
+_CONTEXT_TOPIC_STOP_WORDS = frozenset({
+    "我", "你", "他", "她", "它", "我们", "你们", "他们", "她们",
+    "的", "了", "在", "是", "有", "和", "也", "就", "都", "不",
+    "吧", "吗", "呢", "啊", "呀", "嘛", "哦", "嗯", "哈", "呜",
+    "很", "好", "太", "真", "真的", "特别", "非常", "超", "比较",
+    "这", "那", "这个", "那个", "什么", "怎么", "为什么", "哪",
+    "今天", "昨天", "明天", "现在", "刚才", "之前", "以后",
+    "一个", "一下", "一点", "一些", "还", "又", "再", "把", "被",
+    "说", "想", "看", "去", "来", "做", "会", "能", "要",
+})
+
+
+def _extract_context_signals(context: str) -> dict:
+    text = str(context or "").strip()
+    if not text:
+        return {"valence": None, "arousal": None, "topic_terms": []}
+    valence_sum = 0.0
+    arousal_sum = 0.0
+    emotion_hits = 0
+    for keyword, (v, a) in _CONTEXT_EMOTION_KEYWORDS.items():
+        count = text.count(keyword)
+        if count > 0:
+            valence_sum += v * count
+            arousal_sum += a * count
+            emotion_hits += count
+    ctx_valence = round(valence_sum / emotion_hits, 2) if emotion_hits else None
+    ctx_arousal = round(arousal_sum / emotion_hits, 2) if emotion_hits else None
+    topic_terms: list[str] = []
+    try:
+        import jieba
+        words = list(jieba.cut(text))
+        seen: set[str] = set()
+        for word in words:
+            w = word.strip()
+            if len(w) >= 2 and w not in _CONTEXT_TOPIC_STOP_WORDS and w not in _CONTEXT_EMOTION_KEYWORDS and w not in seen:
+                seen.add(w)
+                topic_terms.append(w)
+    except ImportError:
+        for m in _re.finditer(r"[一-鿿]{2,6}", text):
+            w = m.group()
+            if w not in _CONTEXT_TOPIC_STOP_WORDS and w not in _CONTEXT_EMOTION_KEYWORDS and w not in topic_terms:
+                topic_terms.append(w)
+    for m in _re.finditer(r"[A-Za-z][A-Za-z0-9_.:/-]{2,}", text):
+        w = m.group()
+        if w.lower() not in {"the", "and", "for", "not", "but", "with"} and w not in topic_terms:
+            topic_terms.append(w)
+    return {"valence": ctx_valence, "arousal": ctx_arousal, "topic_terms": topic_terms[:20]}
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
 # 库小且 sampling=ON 时此分支每次 breath 都触发，原本会刷屏；改为 ≥300s
@@ -83,7 +149,7 @@ def _pin_budget_notice(*, required: int, limit: int, omitted: int) -> str:
     return notice + "已达到当前版本 40000 token 安全上限；请精简或取消部分核心准则后重试。"
 
 
-async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -> str:
+async def surface_default(max_results: int, max_tokens: int, tag_filter: list, context: str = "") -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
@@ -104,29 +170,30 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             str(bucket.get("id") or ""), bucket.get("metadata", {})
         )
 
-    # --- pinned/permanent 桶置顶（protected 仅防衰减，不主动浮现）---
-    # 排除 letter 桶：letter 的 importance=10 不代表核心准则。
-    # pinned 与 anchor 在正常写入路径互斥：钉选会清除 anchor，设 anchor 会拒绝 pinned 桶。
-    # 末尾的 anchor 排除是脏数据防御；若异常并存，仍按 anchor 语义不主动浮现。
-    pinned_buckets = [
+    # --- always_surface 桶强制浮现（核心身份记忆）---
+    # pinned/protected 不带 always_surface 的回到普通池竞争排序
+    always_surface_buckets = [
         b for b in all_buckets
-        if (
-            b["metadata"].get("pinned")
-            or b["metadata"].get("type") == "permanent"
-        )
-        and not parse_bool(b["metadata"].get("protected"), default=False)
+        if b["metadata"].get("always_surface")
         and _can_surface(b)
         and not is_letter_bucket(b)
-        and not b["metadata"].get("anchor", False)  # 防御：anchor 是坐标系，永不主动浮现，即使 pinned
+        and not b["metadata"].get("anchor", False)
     ]
+    always_surface_buckets.sort(
+        key=lambda b: (
+            int(b["metadata"].get("importance", 5)),
+            rt.decay_engine.calculate_score(b["metadata"]),
+        ),
+        reverse=True,
+    )
     core_filter_notice = ""
-    if tag_filter and pinned_buckets:
+    if tag_filter and always_surface_buckets:
         core_filter_notice = "[说明：tags 仅过滤普通浮现记忆；核心准则按设计始终注入。]"
     pinned_results = []
     token_budget = max_tokens
     pinned_omitted = 0
     pinned_required_tokens = 0
-    for b in pinned_buckets:
+    for b in always_surface_buckets:
         try:
             rendered, entry_tokens = render_stored_bucket(
                 b,
@@ -140,40 +207,43 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             pinned_results.append(rendered)
             token_budget -= entry_tokens
         except Exception as e:
-            rt.logger.warning(f"Failed to render pinned bucket / 钉选桶渲染失败: {e}")
+            rt.logger.warning(f"Failed to render always_surface bucket / 核心桶渲染失败: {e}")
 
     # --- iter 2.0: anchor 桶在默认浮现模式的 *未解决池* 不出现（anchor 是坐标系不是浮现对象）---
     # anchor 过滤仅作用于 unresolved 候选，不影响 pinned 提取（上方已完成）。
     all_buckets_non_anchor = [b for b in all_buckets if not b["metadata"].get("anchor", False)]
 
-    # --- 未解决桶 ---
+    # --- 未解决桶（pinned/protected 不带 always_surface 的也参与竞争）---
     unresolved = [
         b for b in all_buckets_non_anchor
         if _can_surface(b)
         and not b["metadata"].get("resolved", False)
         and not is_letter_bucket(b)
-        and b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "self", "i")
-        and not b["metadata"].get("pinned", False)
-        and not parse_bool(b["metadata"].get("protected"), default=False)
+        and b["metadata"].get("type") not in ("feel", "plan", "letter", "self", "i")
+        and not b["metadata"].get("always_surface", False)
         and not b["metadata"].get("dont_surface", False)
         and _bucket_has_tags(b["metadata"], tag_filter)
     ]
 
     rt.logger.info(
         f"Breath surfacing: {len(all_buckets)} total, "
-        f"{len(pinned_buckets)} pinned, {len(unresolved)} unresolved"
+        f"{len(always_surface_buckets)} core, {len(unresolved)} unresolved"
     )
 
 
+    ctx_signals = _extract_context_signals(context) if context and context.strip() else None
+
     def _sort_key(b: dict):
-        """F-05: 二级排序 key，消除同分时浮现随机抖动。
-        主键：decay_score（降序）
-        次键：last_active 时间戳（越新越高）
-        三键：arousal × valence（情感强度，越高越先浮现）
-        四键：importance
-        """
         meta = b["metadata"]
-        score = rt.decay_engine.calculate_score(meta)
+        if ctx_signals and (ctx_signals["valence"] is not None or ctx_signals["topic_terms"]):
+            score = rt.decay_engine.contextual_score(
+                meta,
+                context_valence=ctx_signals["valence"],
+                context_arousal=ctx_signals["arousal"],
+                topic_terms=ctx_signals["topic_terms"],
+            )
+        else:
+            score = rt.decay_engine.calculate_score(meta)
         try:
             last_ts = parse_iso_datetime(
                 meta.get("last_active") or meta.get("created", "")

@@ -51,7 +51,9 @@ _DEFAULT_EMOTION_BASE = 1.0       # 情感权重基准
 _DEFAULT_AROUSAL_BOOST = 0.8      # arousal 每 +1 → 情感权重 +0.8
 
 # --- 锁分：某些桶不参与衰减 ---
-_SCORE_PINNED = 999.0    # pinned / protected / permanent 桶恒高分（永不归档）
+_SCORE_ALWAYS_SURFACE = 999.0  # always_surface 桶强制浮现（每次 breath 必出现）
+_SCORE_PINNED = 100.0    # pinned / protected 桶固定高分但正常竞争排序（不会被归档）
+_SCORE_PERMANENT = 100.0 # permanent 桶不衰减（不会被归档）
 _SCORE_FEEL = 50.0       # feel / plan / letter 桶固定中分（生命周期由 status 控制）
 
 # --- 周期自愈：每轮衰减最多补多少条缺失向量（防一次性打爆 embedding API）---
@@ -192,13 +194,17 @@ class DecayEngine:
         if not isinstance(metadata, dict):
             return 0.0
 
-        # --- Pinned/protected buckets: never decay, importance locked to 10 ---
+        # --- always_surface: forced surfacing, highest score ---
+        if metadata.get("always_surface"):
+            return _SCORE_ALWAYS_SURFACE
+
+        # --- Pinned/protected buckets: fixed high score, compete normally ---
         if metadata.get("pinned") or metadata.get("protected"):
             return _SCORE_PINNED
 
         # --- Permanent buckets never decay ---
         if metadata.get("type") == "permanent":
-            return _SCORE_PINNED
+            return _SCORE_PERMANENT
 
         # --- Feel buckets: never decay, fixed moderate score ---
         if metadata.get("type") == "feel":
@@ -270,6 +276,61 @@ class DecayEngine:
         )
 
         return round(base_score * resolved_factor * urgency_boost, 4)
+
+    def contextual_score(
+        self,
+        metadata: dict,
+        *,
+        context_valence: float | None = None,
+        context_arousal: float | None = None,
+        topic_terms: list[str] | None = None,
+    ) -> float:
+        """
+        Context-aware decay score: base score × (1 + context_boost).
+        上下文感知衰减分：基础分 × (1 + 上下文加成)。
+        """
+        base = self.calculate_score(metadata)
+        if not isinstance(metadata, dict):
+            return base
+
+        has_emotion = context_valence is not None and context_arousal is not None
+        has_topic = bool(topic_terms)
+        if not has_emotion and not has_topic:
+            return base
+
+        emotion_sim = 0.5
+        if has_emotion:
+            try:
+                b_valence = float(metadata.get("valence", 0.5))
+                b_arousal = float(metadata.get("arousal", 0.3))
+                dist = math.sqrt(
+                    (context_valence - b_valence) ** 2
+                    + (context_arousal - b_arousal) ** 2
+                )
+                emotion_sim = max(0.0, 1.0 - dist / 1.414)
+            except (ValueError, TypeError):
+                emotion_sim = 0.5
+
+        topic_match = 0.0
+        if has_topic:
+            bucket_text = " ".join([
+                str(metadata.get("name") or ""),
+                " ".join(str(t) for t in metadata.get("tags", []) or []),
+                " ".join(str(d) for d in metadata.get("domain", []) or []),
+            ]).lower()
+            for term in topic_terms:
+                if str(term).lower() in bucket_text:
+                    topic_match = 1.0
+                    break
+
+        if has_emotion and has_topic:
+            context_boost = emotion_sim * 0.4 + topic_match * 0.6
+        elif has_emotion:
+            context_boost = emotion_sim
+        else:
+            context_boost = topic_match
+
+        return round(base * (1.0 + context_boost), 4)
 
     # ---------------------------------------------------------
     # Execute one decay cycle

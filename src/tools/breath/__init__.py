@@ -59,9 +59,11 @@ async def dispatch(
     catalog: Optional[bool] = False,
     date_from: Optional[str] = "",
     date_to: Optional[str] = "",
+    context: Optional[str] = "",
 ) -> str:
     # --- Null-safe coercion ---
     query = "" if query is None else str(query)
+    context = "" if context is None else str(context)
     if max_tokens is None:
         max_tokens = 0
     domain = "" if domain is None else str(domain)
@@ -149,6 +151,7 @@ async def dispatch(
             max_results=max_results,
             max_tokens=memory_max_tokens,
             tag_filter=tag_filter,
+            context=context,
         ))
 
     # --- 有 query：检索模式 ---
