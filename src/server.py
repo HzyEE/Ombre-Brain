@@ -8,8 +8,9 @@ DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime �
 web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/tools/<工具>/ 下面）。
 
 关键行为：
-- 启动后暴露 23 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/source_read/
+- 启动后暴露 26 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/source_read/
   source_attach/source_detach/source_restore/relation_read/relation_attach/relation_detach/relation_restore/
+  read_bucket/list_buckets_light/profile_fact/
   trace/anchor/release/pulse/plan/letter_write/
   letter_lock_update/letter_read/dream/I；每个入口
   ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
@@ -25,11 +26,12 @@ web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/too
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：mcp 单实例 + 23 个 @mcp.tool() 函数；HTTP 路由在 src/web/*
+对外暴露：mcp 单实例 + 26 个 @mcp.tool() 函数；HTTP 路由在 src/web/*
 ========================================
 """
 
 import os
+import re
 import sys
 import logging
 import asyncio
@@ -55,7 +57,7 @@ from ombrebrain.storage.source_store import SourceStore
 from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
-from utils import get_version, load_config, setup_logging
+from utils import get_version, load_config, setup_logging, strip_wikilinks
 
 # --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
 # 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
@@ -924,6 +926,163 @@ async def relation_restore(bucket_id: str, relation_slot: int, expected_title: s
         op="relation_restore",
         args={"bucket_id": bucket_id, "relation_slot": relation_slot},
     )
+
+
+_MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _coerce_memory_id(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+@mcp.tool()
+async def read_bucket(bucket_id: str) -> dict:
+    """按 bucket_id 精确读取完整记忆桶；trace/comment 前先读。只读，不刷新活跃度。"""
+    bucket_id = _coerce_memory_id(bucket_id)
+    if not bucket_id or not _MEMORY_ID_RE.fullmatch(bucket_id):
+        return {"error": "invalid bucket_id"}
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return {"error": "not found", "id": bucket_id}
+    meta = bucket.get("metadata", {})
+    return {
+        "id": bucket["id"],
+        "metadata": meta,
+        "content": strip_wikilinks(bucket.get("content", "")),
+        "score": decay_engine.calculate_score(meta),
+    }
+
+
+def _bucket_light_payload(bucket: dict) -> dict:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    return {
+        "id": bucket.get("id", ""),
+        "bucket_id": bucket.get("id", ""),
+        "name": meta.get("name", bucket.get("id", "")),
+        "type": meta.get("type", "dynamic"),
+        "domain": meta.get("domain", []),
+        "tags": meta.get("tags", []),
+        "importance": meta.get("importance", 5),
+        "confidence": meta.get("confidence", 0.5),
+        "created": str(meta.get("created") or ""),
+        "updated_at": str(meta.get("updated_at") or ""),
+        "last_active": str(meta.get("last_active") or ""),
+        "resolved": bool(meta.get("resolved", False)),
+        "digested": bool(meta.get("digested", False)),
+        "pinned": bool(meta.get("pinned", False)),
+        "protected": bool(meta.get("protected", False)),
+        "anchor": bool(meta.get("anchor", False)),
+    }
+
+
+@mcp.tool()
+async def list_buckets_light(
+    include_archive: bool = False,
+    limit: int = 500,
+    offset: int = 0,
+) -> dict:
+    """只读列出桶的轻量元数据；不返回正文，给同步脚本和外部索引用。"""
+    safe_limit = max(1, min(int(limit or 500), 2000))
+    safe_offset = max(0, int(offset or 0))
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=include_archive)
+        items = [_bucket_light_payload(b) for b in all_buckets]
+        items.sort(key=lambda item: str(item.get("created") or ""), reverse=True)
+        return {
+            "buckets": items[safe_offset : safe_offset + safe_limit],
+            "count": len(items),
+            "include_archive": bool(include_archive),
+            "limit": safe_limit,
+            "offset": safe_offset,
+        }
+    except Exception as e:
+        return {"error": str(e), "buckets": []}
+
+
+def _profile_key(value: str, default: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"[^0-9a-zA-Z_\-一-鿿]+", "", text)
+    return text or default
+
+
+def _profile_fact_body(*, fact: str, evidence_context: str = "", reflection: str = "") -> str:
+    sections = [("fact", fact)]
+    if str(evidence_context or "").strip():
+        sections.append(("evidence_context", str(evidence_context).strip()))
+    if str(reflection or "").strip():
+        sections.append(("reflection", str(reflection).strip()))
+    return "\n\n".join(f"### {heading}\n{text.strip()}" for heading, text in sections)
+
+
+_FIRST_PERSON_RE = re.compile(r"我[记明白以会要觉知在想]|我的|我们")
+
+
+@mcp.tool()
+async def profile_fact(
+    fact: str,
+    evidence_bucket_id: str,
+    profile_kind: str = "preference",
+    subject: str = "user",
+    predicate: str = "",
+    object_value: str = "",
+    evidence_context: str = "",
+    reflection: str = "",
+    confidence: float = 0.9,
+) -> str:
+    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。reflection 可选，但必须写成"我……"第一人称。"""
+    fact = str(fact or "").strip()
+    evidence_bucket_id = _coerce_memory_id(evidence_bucket_id)
+    if not fact:
+        return "fact 为空，无法写入画像事实。"
+    if not evidence_bucket_id or not _MEMORY_ID_RE.fullmatch(evidence_bucket_id):
+        return "请提供有效的 evidence_bucket_id。"
+    evidence_bucket = await bucket_mgr.get(evidence_bucket_id)
+    if not evidence_bucket:
+        return f"证据记忆桶不存在: {evidence_bucket_id}"
+    if str(reflection or "").strip() and not _FIRST_PERSON_RE.search(reflection):
+        return '写入被拒绝：reflection 必须用模型第一人称写，用"我记得 / 我明白 / 我以后 / 我会"等表达。'
+
+    kind = _profile_key(profile_kind, "preference")
+    subject_key = _profile_key(subject, "user")
+    predicate_key = _profile_key(predicate, "")
+    object_text = str(object_value or "").strip()
+    safe_confidence = max(0.0, min(1.0, float(confidence or 0.9)))
+    body = _profile_fact_body(
+        fact=fact,
+        evidence_context=evidence_context,
+        reflection=reflection,
+    )
+    tags = ["profile_fact", f"profile_{kind}"]
+    if predicate_key:
+        tags.append(f"profile_predicate_{predicate_key}")
+    fact_name = "画像事实：" + fact[:48]
+
+    bucket_id = await bucket_mgr.create(
+        content=body,
+        tags=list(dict.fromkeys(tags)),
+        importance=8,
+        domain=list(dict.fromkeys(["profile", kind])),
+        valence=0.5,
+        arousal=0.3,
+        name=fact_name,
+        bucket_type="permanent",
+        source_tool="profile_fact",
+    )
+    await bucket_mgr.update(
+        bucket_id,
+        confidence=safe_confidence,
+        profile_kind=kind,
+        subject=subject_key,
+        predicate=predicate_key,
+        object=object_text,
+        evidence=[{"bucket_id": evidence_bucket_id}],
+    )
+    return f"profile_fact→{bucket_id} evidence→{evidence_bucket_id}"
 
 
 @mcp.tool()
