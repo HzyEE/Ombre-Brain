@@ -2344,6 +2344,7 @@ class BucketManager:
             "dont_surface",
             "first_of_kind",
             "anchor",
+            "always_surface",
         ):
             if field in kwargs:
                 kwargs[field] = parse_bool(kwargs[field])
@@ -2542,6 +2543,12 @@ class BucketManager:
                 post.metadata.pop("protected", None)
         if "digested" in kwargs:
             post["digested"] = kwargs["digested"]
+        if "always_surface" in kwargs:
+            if kwargs["always_surface"]:
+                post["always_surface"] = True
+                post["importance"] = _PINNED_IMPORTANCE
+            else:
+                post.metadata.pop("always_surface", None)
         if "model_valence" in kwargs:
             post["model_valence"] = _clamp01(kwargs["model_valence"], _DEFAULT_VALENCE)
         if "media" in kwargs:
